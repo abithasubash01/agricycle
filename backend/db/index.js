@@ -32,43 +32,73 @@ if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && SUPABASE_URL.startsWith('http')
   }
 }
 
-// Local Persistent Store Setup (fallback for out-of-the-box operation)
-const dataDir = path.join(__dirname, '..', 'data');
-const dataFilePath = path.join(dataDir, 'agricycle_data.json');
+const os = require('os');
+
+// Local / Serverless Store Setup
+// In serverless environments (e.g. Vercel / AWS Lambda), the deployment bundle directory is read-only.
+// We resolve writable storage to os.tmpdir() when in serverless or when root directory is not writable.
+const isServerless = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT);
+const bundledDataFilePath = path.join(__dirname, '..', 'data', 'agricycle_data.json');
+const targetDataDir = isServerless ? os.tmpdir() : path.join(__dirname, '..', 'data');
+const dataFilePath = isServerless ? path.join(os.tmpdir(), 'agricycle_data.json') : bundledDataFilePath;
+
+// In-memory fallback to guarantee zero crash in read-only environments
+let memoryStore = {
+  users: [],
+  farmer_listings: [],
+  buyer_requirements: [],
+  opportunities: []
+};
+
+// Pre-populate memory store from bundled seed data if available
+try {
+  if (fs.existsSync(bundledDataFilePath)) {
+    const raw = fs.readFileSync(bundledDataFilePath, 'utf-8');
+    memoryStore = JSON.parse(raw);
+  }
+} catch (e) {
+  // Ignore pre-populate error
+}
 
 function initLocalStore() {
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
-  if (!fs.existsSync(dataFilePath)) {
-    const initialData = {
-      users: [],
-      farmer_listings: [],
-      buyer_requirements: [],
-      opportunities: []
-    };
-    fs.writeFileSync(dataFilePath, JSON.stringify(initialData, null, 2), 'utf-8');
+  try {
+    if (!fs.existsSync(targetDataDir)) {
+      fs.mkdirSync(targetDataDir, { recursive: true });
+    }
+    if (!fs.existsSync(dataFilePath)) {
+      fs.writeFileSync(dataFilePath, JSON.stringify(memoryStore, null, 2), 'utf-8');
+    }
+  } catch (err) {
+    // If filesystem is read-only, silently fallback to memoryStore
   }
 }
 
 function readLocalData() {
   initLocalStore();
   try {
-    const raw = fs.readFileSync(dataFilePath, 'utf-8');
-    return JSON.parse(raw);
+    if (fs.existsSync(dataFilePath)) {
+      const raw = fs.readFileSync(dataFilePath, 'utf-8');
+      return JSON.parse(raw);
+    }
   } catch (e) {
-    return { users: [], farmer_listings: [], buyer_requirements: [], opportunities: [] };
+    // Return memoryStore
   }
+  return memoryStore;
 }
 
 function writeLocalData(data) {
-  initLocalStore();
-  fs.writeFileSync(dataFilePath, JSON.stringify(data, null, 2), 'utf-8');
+  memoryStore = data;
+  try {
+    initLocalStore();
+    fs.writeFileSync(dataFilePath, JSON.stringify(data, null, 2), 'utf-8');
+  } catch (e) {
+    // Maintained in memoryStore
+  }
 }
 
 if (dbMode === 'local') {
   initLocalStore();
-  console.log('ℹ️ Database running in persistent local mode (backend/data/agricycle_data.json). Set SUPABASE_URL in .env to connect to hosted Supabase.');
+  console.log(`ℹ️ Database running in local store mode (${isServerless ? 'serverless /tmp' : 'local file'}). Set SUPABASE_URL in .env to connect to hosted Supabase.`);
 }
 
 // Unified Database API
