@@ -34,15 +34,48 @@ if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && SUPABASE_URL.startsWith('http')
 
 const os = require('os');
 
-// Local / Serverless Store Setup
-// In serverless environments (e.g. Vercel / AWS Lambda), the deployment bundle directory is read-only.
-// We resolve writable storage to os.tmpdir() when in serverless or when root directory is not writable.
-const isServerless = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT);
-const bundledDataFilePath = path.join(__dirname, '..', 'data', 'agricycle_data.json');
-const targetDataDir = isServerless ? os.tmpdir() : path.join(__dirname, '..', 'data');
-const dataFilePath = isServerless ? path.join(os.tmpdir(), 'agricycle_data.json') : bundledDataFilePath;
+// ─── Local / Serverless Store Setup ───────────────────────────────────────────
+//
+// Vercel serverless functions run inside /var/task which is a READ-ONLY
+// filesystem. Any attempt to create directories or write files inside
+// /var/task will throw ENOENT or EROFS and crash the function.
+//
+// Detection strategy (most reliable to least):
+//  1. Check if the project directory itself lives under a known
+//     serverless read-only root (/var/task, /var/runtime, /opt).
+//  2. Check environment variables set by cloud platforms.
+//  3. Fall through to local dev path.
+//
+// Writable locations by platform:
+//  Vercel / AWS Lambda → /tmp   (512 MB, ephemeral)
+//  Local development   → backend/data  (persistent across runs)
+//
+// If the filesystem is still not writable (unlikely), we fall through
+// to an in-memory store so the process never crashes.
 
-// In-memory fallback to guarantee zero crash in read-only environments
+const projectRootPath = path.resolve(__dirname, '..');
+
+// Detect read-only serverless filesystem by checking known path prefixes
+const SERVERLESS_READ_ONLY_PATHS = ['/var/task', '/var/runtime', '/opt/nodejs', '/opt/amazon'];
+const isServerlessByPath = SERVERLESS_READ_ONLY_PATHS.some((p) => projectRootPath.startsWith(p));
+
+// Detect via environment variables (Vercel injects VERCEL=1 at runtime,
+// but some versions only inject it during build — path check is the backup)
+const isServerlessByEnv = !!(process.env.VERCEL || process.env.NOW_REGION ||
+  process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT);
+
+const isServerless = isServerlessByPath || isServerlessByEnv;
+
+// Path where bundled/seed data lives (always readable in both envs)
+const bundledDataFilePath = path.join(__dirname, '..', 'data', 'agricycle_data.json');
+
+// Writable data directory and file
+// Local dev  → backend/data/agricycle_data.json  (persistent)
+// Serverless → /tmp/agricycle_data.json          (ephemeral per invocation)
+const targetDataDir  = isServerless ? path.join('/tmp') : path.join(__dirname, '..', 'data');
+const dataFilePath   = path.join(targetDataDir, 'agricycle_data.json');
+
+// ── In-memory store — used as the final fallback if even /tmp is unavailable
 let memoryStore = {
   users: [],
   farmer_listings: [],
@@ -50,16 +83,19 @@ let memoryStore = {
   opportunities: []
 };
 
-// Pre-populate memory store from bundled seed data if available
+// Pre-populate from bundled seed file when available (read-only operation, always safe)
 try {
   if (fs.existsSync(bundledDataFilePath)) {
     const raw = fs.readFileSync(bundledDataFilePath, 'utf-8');
     memoryStore = JSON.parse(raw);
   }
-} catch (e) {
-  // Ignore pre-populate error
+} catch (_) {
+  // Ignore — memoryStore stays as empty defaults
 }
 
+// ── initLocalStore ────────────────────────────────────────────────────────────
+// Idempotent. Creates the writable directory and seed file if they don't exist.
+// Never throws — if writing fails we continue with memoryStore.
 function initLocalStore() {
   try {
     if (!fs.existsSync(targetDataDir)) {
@@ -69,7 +105,7 @@ function initLocalStore() {
       fs.writeFileSync(dataFilePath, JSON.stringify(memoryStore, null, 2), 'utf-8');
     }
   } catch (err) {
-    // If filesystem is read-only, silently fallback to memoryStore
+    // /tmp was not writable (extremely rare) — fall through to memoryStore
   }
 }
 
@@ -80,25 +116,28 @@ function readLocalData() {
       const raw = fs.readFileSync(dataFilePath, 'utf-8');
       return JSON.parse(raw);
     }
-  } catch (e) {
-    // Return memoryStore
+  } catch (_) {
+    // Fall through to memoryStore
   }
   return memoryStore;
 }
 
 function writeLocalData(data) {
-  memoryStore = data;
+  memoryStore = data; // Always update in-memory first
   try {
     initLocalStore();
     fs.writeFileSync(dataFilePath, JSON.stringify(data, null, 2), 'utf-8');
-  } catch (e) {
-    // Maintained in memoryStore
+  } catch (_) {
+    // Maintained in memoryStore; next read will use memoryStore
   }
 }
 
 if (dbMode === 'local') {
   initLocalStore();
-  console.log(`ℹ️ Database running in local store mode (${isServerless ? 'serverless /tmp' : 'local file'}). Set SUPABASE_URL in .env to connect to hosted Supabase.`);
+  const storeInfo = isServerless
+    ? `serverless ephemeral store at ${dataFilePath}`
+    : `local file store at ${dataFilePath}`;
+  console.log(`ℹ️ Database mode: ${storeInfo}. Set SUPABASE_URL in .env to connect to hosted Supabase.`);
 }
 
 // Unified Database API
