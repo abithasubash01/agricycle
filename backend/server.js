@@ -1,63 +1,141 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
 const app = express();
-app.use(cors());
+
+// Production-ready CORS configuration:
+// Supports FRONTEND_URL or CORS_ORIGIN from environment variables (comma-separated or wildcard).
+// Supports cloud platforms (Vercel, Netlify, Render), localhost, and non-browser health checks.
+const rawFrontendUrls = process.env.FRONTEND_URL || process.env.CORS_ORIGIN || '';
+const configuredOrigins = rawFrontendUrls
+  ? rawFrontendUrls.split(',').map((o) => o.trim().replace(/\/+$/, ''))
+  : [];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow non-browser requests (mobile, curl, server-to-server, Render/AWS health checkers)
+    if (!origin) return callback(null, true);
+
+    const cleanOrigin = origin.replace(/\/+$/, '');
+
+    // Allow all if explicitly configured with wildcard or if no restrictions set
+    if (configuredOrigins.includes('*') || configuredOrigins.length === 0) {
+      return callback(null, true);
+    }
+
+    // Match exact configured origins or known cloud platforms / localhost
+    if (
+      configuredOrigins.includes(cleanOrigin) ||
+      cleanOrigin.includes('localhost') ||
+      cleanOrigin.includes('127.0.0.1') ||
+      cleanOrigin.endsWith('.vercel.app') ||
+      cleanOrigin.endsWith('.netlify.app') ||
+      cleanOrigin.endsWith('.onrender.com')
+    ) {
+      return callback(null, true);
+    }
+
+    // Default: allow origin to ensure deployed frontend can always connect
+    return callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'AGRICYCLE backend running' });
-});
+// Import Routes
+const healthRoute = require('./routes/health');
+const authRoutes = require('./routes/auth');
+const listingRoutes = require('./routes/listings');
+const buyerRoutes = require('./routes/buyers');
+const residueRoutes = require('./routes/residue');
+const transportRoutes = require('./routes/transport');
+const opportunityRoutes = require('./routes/opportunities');
 
-app.post('/api/residue/calculate', (req, res) => {
-  const { crop, harvestQuantityKg } = req.body;
-  // Simple mock: if 5000kg, return 3500kg
+// Mount Routes
+app.use('/api/health', healthRoute);
+app.use('/api/auth', authRoutes);
+app.use('/api/listings', listingRoutes);
+app.use('/api/buyers', buyerRoutes);
+app.use('/api/residue', residueRoutes);
+app.use('/api/transport', transportRoutes);
+app.use('/api/opportunities', opportunityRoutes);
+
+// Root info
+app.get('/', (req, res) => {
   res.json({
-    residueType: crop === 'rice' ? 'Rice Straw' : 'Crop Residue',
-    estimatedQuantity: harvestQuantityKg * 0.7, // 3500 for 5000
-    environmentalImpact: { co2EmissionsAvoided: 5000 }
-  });
-});
-
-app.get('/api/buyers', (req, res) => {
-  res.json([{ id: 1, name: 'Eco Fuels Ltd', location: 'Chennai' }]);
-});
-
-app.post('/api/buyers/match', (req, res) => {
-  res.json({
-    matches: [
-      {
-        id: 'buyer1',
-        name: 'Eco Fuels Ltd',
-        location: 'Chennai',
-        requiredResidues: ['Rice Straw'],
-        offeredPricePerQuintal: 300, // 3 rs/kg = 300 rs/quintal
-        distance: 150,
-        industryType: 'Biomass Fuel',
-        matchScore: 98
-      }
+    name: 'AGRICYCLE API',
+    version: '2.0.0',
+    description: 'Full-stack agricultural crop-residue-to-resource platform backend with real DB persistence',
+    dbMode: require('./db').getMode(),
+    endpoints: [
+      'GET  /api/health',
+      'POST /api/auth/register',
+      'POST /api/auth/login',
+      'GET  /api/auth/me',
+      'GET  /api/listings',
+      'POST /api/listings',
+      'GET  /api/listings/:id',
+      'PUT  /api/listings/:id',
+      'DELETE /api/listings/:id',
+      'GET  /api/buyers',
+      'GET  /api/buyers/requirements',
+      'POST /api/buyers/requirements',
+      'GET  /api/buyers/requirements/:id',
+      'PUT  /api/buyers/requirements/:id',
+      'DELETE /api/buyers/requirements/:id',
+      'POST /api/buyers/match',
+      'POST /api/residue/calculate',
+      'POST /api/transport/calculate',
+      'GET  /api/opportunities',
+      'POST /api/opportunities/analyze',
+      'GET  /api/opportunities/:id'
     ]
   });
 });
 
-app.post('/api/transport/calculate', (req, res) => {
-  // Return fixed mock values based on prompt
-  res.json({
-    distanceKm: 150,
-    estimatedCost: 375
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Endpoint not found',
+    path: req.originalUrl,
+    statusCode: 404
   });
 });
 
-app.post('/api/opportunities/analyze', (req, res) => {
-  res.json({
-    grossValue: 10500,
-    transportCost: 375,
-    handlingCost: 525,
-    totalCosts: 900,
-    netValue: 9600,
-    quantity: 3500
+// Global error handler
+app.use((err, req, res, next) => {
+  const status = err.status || err.statusCode || 500;
+  if (status === 400 && err.type === 'entity.parse.failed') {
+    return res.status(400).json({
+      error: 'Invalid JSON payload',
+      message: 'Malformed JSON syntax in request body',
+      statusCode: 400
+    });
+  }
+  console.error('Server Error:', err);
+  res.status(status).json({
+    error: status === 500 ? 'Server error' : err.name || 'Error',
+    message: err.message || 'An unexpected error occurred',
+    statusCode: status
   });
 });
 
-const PORT = 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// Start
+const PORT = process.env.PORT || 5000;
+const HOST = '0.0.0.0';
+
+if (require.main === module) {
+  app.listen(PORT, HOST, () => {
+    const db = require('./db');
+    console.log('=========================================');
+    console.log(`  AGRICYCLE Backend v2.0 Started`);
+    console.log(`  Listening on: http://${HOST}:${PORT}`);
+    console.log(`  DB Mode: ${db.getMode()}`);
+    console.log('=========================================');
+  });
+}
+
+module.exports = app;

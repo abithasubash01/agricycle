@@ -1,0 +1,24 @@
+{
+  "name": "agricycle-backend",
+  "version": "1.0.0",
+  "description": "AGRICYCLE Backend - AI-powered agricultural crop-residue-to-resource platform REST API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test test/api.test.js"
+  },
+  "keywords": [
+    "agricycle",
+    "agriculture",
+    "crop-residue",
+    "hackathon",
+    "api"
+  ],
+  "author": "AGRICYCLE Team",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
